@@ -1,0 +1,11 @@
+[project]
+name = "download-and-compress-and-concat-gribs"
+version = "0.1.0"
+description = "Just tinkering with ways to concurrently download GRIBs from DWD's HTTP server, compress as zstd, concat, and upload to S3"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "backports-zstd>=0.5.0",
+    "marimo>=0.16.5",
+    "obstore>=0.8.2",
+]
