@@ -194,12 +194,19 @@ def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
         duration_of_update: timedelta,
         now: datetime = datetime.now(UTC),
     ) -> list[datetime]:
-        """Remove any NWP run that's currently in the process of being transfered
-        to DWD's FTP server (and hence is in an inconsistent data).
+        """Remove any NWP run whose files are currently being transfered from DWD's HPC
+        to DWD's FTP server (and hence is in an inconsistent state on the FTP server).
 
         For example, for even-numbered ICON-EU initializations, ignore any NWP run if the time now
         is between 2:15 (hh:mm) and 3:45 after the NWP init time.
         For example, ignore the NWP 00Z init if the time now is between 2:15am and 3:45am UTC.
+
+        Warning
+        -------
+        This function ignores the fact that odd-numbered ICON-EU model runs (3, 9, 15, 21) take less time to be transferred from
+        DWD's HPC to DWD's FTP server than even-numbered model runs. We make this simplifications because we only plan
+        to archive even-numbered NWP inits. So this function assumes that NWP model runs have the same delay (which is
+        true when we're only considering even-numbered NWP inits).
 
         Parameters
         ----------
