@@ -9,6 +9,7 @@ dependencies = [
     "ftputil>=5.1.0",
     "marimo>=0.16.5",
     "obstore>=0.8.2",
+    "python-lsp-server>=1.13.1",
     "ruff>=0.13.3",
     "ty>=0.0.1a21",
 ]

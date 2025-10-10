@@ -14,13 +14,25 @@ def _():
     from typing import Optional, NamedTuple
     from collections.abc import Sequence
     import asyncio
-    return NamedTuple, Path, aioftp, asyncio, mo, obstore
+    from datetime import datetime, UTC, timedelta
+    return (
+        NamedTuple,
+        Path,
+        Sequence,
+        UTC,
+        aioftp,
+        asyncio,
+        datetime,
+        mo,
+        obstore,
+        timedelta,
+    )
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(
-        r"""DWD's HTTPS server doesn't support `PROPFIND` (which is the HTTP method used by `obstore.HTTPStore.list`). So we use DWD's FTP server instead."""
+        r"""We use DWD's FTP server instead of DWD's HTTPS server because DWD's HTTPS server doesn't support `PROPFIND` (which is the HTTP method used by `obstore.HTTPStore.list`)."""
     )
     return
 
@@ -106,7 +118,7 @@ async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
     await _input_queue.put(
         FtpTask(
             src_path=Path(
-                "/weather/nwp/icon-eu/grib/00/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025100900_000_ALB_RAD.grib2.bz2"
+                "/weather/nwp/icon-eu/grib/00/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025101000_000_ALB_RAD.grib2.bz2"
             ),
             dst_path="/home/jack/data/test.grib2.bz2",
         )
@@ -137,6 +149,94 @@ async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
         await _input_queue.join()
         print("joined input_queue!")
         output_queue.shutdown()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""## Determine which NWP files to transfer""")
+    return
+
+
+@app.cell
+def _(Sequence, UTC, datetime, timedelta):
+    def get_nwp_init_datetimes(
+        nwp_init_hours: Sequence[int], now: datetime = datetime.now(UTC)
+    ) -> list[datetime]:
+        today_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_midnight = today_midnight - timedelta(days=1)
+
+        nwp_init_datetimes = []
+        for nwp_init_hour in nwp_init_hours:
+            nwp_init_hour_td = timedelta(hours=nwp_init_hour)
+            if nwp_init_hour < now.hour:
+                # The NWP was run earlier today.
+                nwp_init_datetimes.append(today_midnight + nwp_init_hour_td)
+            else:
+                # The NWP was run yesterday.
+                nwp_init_datetimes.append(yesterday_midnight + nwp_init_hour_td)
+
+        nwp_init_datetimes.sort()
+        return nwp_init_datetimes
+
+
+    NWP_INIT_HOURS = (0, 6, 12, 18)
+    nwp_init_datetimes = get_nwp_init_datetimes(nwp_init_hours=NWP_INIT_HOURS)
+    nwp_init_datetimes
+    return (nwp_init_datetimes,)
+
+
+@app.cell
+def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
+    def remove_nwp_runs_currently_being_updated(
+        nwp_init_datetimes: Sequence[datetime],
+        delay_between_now_and_start_of_update: timedelta,
+        duration_of_update: timedelta,
+        now: datetime = datetime.now(UTC),
+    ) -> list[datetime]:
+        """Remove any NWP run that's currently in the process of being transfered
+        to DWD's FTP server (and hence is in an inconsistent data).
+
+        For example, for even-numbered ICON-EU initializations, ignore any NWP run if the time now
+        is between 2:15 (hh:mm) and 3:45 after the NWP init time.
+        For example, ignore the NWP 00Z init if the time now is between 2:15am and 3:45am UTC.
+
+        Parameters
+        ----------
+        nwp_init_datetimes : Sequence[datetime]
+            The list of datetimes for the NWP initialisations currently available on DWD's FTP server.
+        delay_between_now_and_start_of_update : timedelta
+            The delay between the time now and when DWD start to copy grib files from DWD's HPC to DWD's FTP server.
+        duration_of_update : timedelta
+            The duration of the transfer from DWD's HPC to DWD's FTP server.
+        now : datetime (defaults to datetime.now(UTC))
+        """
+        # Ignore NWP inits that are between `ignore_from_dt` and `ignore_to_dt`.
+        ignore_to_dt = now - delay_between_now_and_start_of_update
+        ignore_from_dt = ignore_to_dt - duration_of_update
+        print(f"{now=}\n{ignore_from_dt=}\n{ignore_to_dt=}")
+        predicate = lambda init_datetime: not (ignore_from_dt <= init_datetime <= ignore_to_dt)
+        return list(filter(predicate, nwp_init_datetimes))
+
+
+    remove_nwp_runs_currently_being_updated(
+        nwp_init_datetimes,
+        delay_between_now_and_start_of_update=timedelta(hours=2, minutes=15),
+        duration_of_update=timedelta(hours=1, minutes=30),
+        now=datetime.now(UTC).replace(hour=2, minute=30),
+    )
+    return
+
+
+@app.cell
+def _(timedelta):
+    timedelta(hours=3, minutes=45) - timedelta(hours=2, minutes=15)
+    return
+
+
+@app.cell
+def _():
+    5400 / 60
     return
 
 
