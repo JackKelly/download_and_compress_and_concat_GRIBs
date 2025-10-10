@@ -188,7 +188,7 @@ def _(Sequence, UTC, datetime, timedelta):
 
 @app.cell
 def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
-    def remove_nwp_runs_currently_being_updated(
+    def remove_inconsistent_nwp_model_runs(
         nwp_init_datetimes: Sequence[datetime],
         delay_between_now_and_start_of_update: timedelta,
         duration_of_update: timedelta,
@@ -226,7 +226,7 @@ def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
         return list(filter(predicate, nwp_init_datetimes))
 
 
-    remove_nwp_runs_currently_being_updated(
+    remove_inconsistent_nwp_model_runs(
         nwp_init_datetimes,
         delay_between_now_and_start_of_update=timedelta(hours=2, minutes=15),
         duration_of_update=timedelta(hours=1, minutes=30),
