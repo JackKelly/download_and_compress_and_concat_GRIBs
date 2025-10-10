@@ -203,8 +203,8 @@ def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
 
         Warning
         -------
-        This function ignores the fact that odd-numbered ICON-EU model runs (3, 9, 15, 21) take less time to be transferred from
-        DWD's HPC to DWD's FTP server than even-numbered model runs. We make this simplifications because we only plan
+        This function ignores the fact that odd-numbered ICON-EU model runs (3, 9, 15, 21) take less time to transfer from
+        DWD's HPC to DWD's FTP server than even-numbered model runs (0, 6, 12, 18). We make this simplifications because we only plan
         to archive even-numbered NWP inits. So this function assumes that NWP model runs have the same delay (which is
         true when we're only considering even-numbered NWP inits).
 
