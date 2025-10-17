@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.16.5"
+__generated_with = "0.17.0"
 app = marimo.App(width="full")
 
 
@@ -44,7 +44,13 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""## Concurrent FTP download & `obstore` upload""")
+    mo.md(
+        r"""
+    ## Concurrent FTP download & `obstore` upload
+
+    We use two MPMC queues. Each `ftp_worker` keeps an `aioftp.Client` alive, and repeatedly takes an `FtpTask` off its `input_queue: Queue[FtpTask]`, downloads the FTP file, and puts the binary payload onto its `output_queue: Queue[ObstoreTask]`.
+    """
+    )
     return
 
 
@@ -62,6 +68,7 @@ def _(NamedTuple, Path, aioftp, asyncio):
         n_retries: int = 0
 
 
+    # TODO: Maybe rename input_queue to ftp_task_queue, and rename output_queue to obstore_task_queue?
     async def ftp_worker(
         worker_id: int,
         ftp_host: str,
@@ -100,6 +107,11 @@ def _(NamedTuple, Path, aioftp, asyncio):
 
 @app.cell
 def _(ObstoreTask, asyncio):
+    # TODO:
+    # Add type for `store` in function declaration.
+    # Rename `output_queue` to something like `obstore_queue`?
+
+    # Obstores are designed to work concurrently, so we can share one `obstore` between tasks.
     async def obstore_worker(worker_id: int, store, output_queue: asyncio.Queue[ObstoreTask]):
         while True:
             print(f"obstore_worker {worker_id}: Getting output_queue task")
@@ -119,6 +131,7 @@ def _(ObstoreTask, asyncio):
 
 @app.cell
 async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
+    # TODO: Rename _input_queue to something like ftp_task_queue?
     _input_queue = asyncio.Queue(maxsize=10)
     await _input_queue.put(
         FtpTask(
@@ -273,7 +286,7 @@ app._unparsable_cell(
         )
         print(list(dst_listing))
 
-        # TODO: Use the code below to turn the FTP listing and obstore listings to DataFrames,
+        # TODO: Use the code below to turn the FTP listing and obstore listings to pl.DataFrames,
         # and then get the set difference (to show which files are available on FTP and not available on S3)
         # and then, for all the files we want to copy from FTP, create the dst_path in the pl.DataFrame.
 
@@ -281,7 +294,7 @@ app._unparsable_cell(
         # not interested in the odd-numbered inits or the init we're gonna leave out because it's inconsistent.
         # Although, perhaps we don't actually need to filter out the \"inconsistent\" model runs, now that we're 
         # just listing everything. We could make the code simpler _and_ get files with lower latency by just
-        # copying everything.
+        # copying everything (and removing remove_inconsistent_nwp_model_runs).
 
         # And then test downloading actual data locally.
         # Then think about how to move this code into small-sized PRs for dynamical/reformatters.
