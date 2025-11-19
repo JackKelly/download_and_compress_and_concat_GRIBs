@@ -1,22 +1,23 @@
 import marimo
 
-__generated_with = "0.17.0"
+__generated_with = "0.17.8"
 app = marimo.App(width="full")
 
 
 @app.cell
 def _():
-    import marimo as mo
-
-    import obstore, obstore.store
-    import aioftp
-    from pathlib import Path, PurePosixPath
-    from typing import Optional, NamedTuple
-    from collections.abc import Sequence
     import asyncio
-    from datetime import datetime, UTC, timedelta
-    import polars as pl
+    from collections.abc import Sequence
+    from datetime import UTC, datetime, timedelta
+    from pathlib import Path, PurePosixPath
+    from typing import NamedTuple
+
+    import aioftp
     import arro3
+    import marimo as mo
+    import obstore
+    import obstore.store
+    import polars as pl
     return (
         NamedTuple,
         Path,
@@ -36,21 +37,21 @@ def _():
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""We use DWD's FTP server instead of DWD's HTTPS server because DWD's HTTPS server doesn't support `PROPFIND` (which is the HTTP method used by `obstore.HTTPStore.list`)."""
-    )
+    mo.md(r"""
+    We use DWD's FTP server instead of DWD's HTTPS server because DWD's HTTPS server doesn't support `PROPFIND` (which is the HTTP method used by `obstore.HTTPStore.list`).
+    """)
     return
 
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
-    ## Concurrent FTP download & `obstore` upload
+    mo.md(r"""
+    ## Concurrent FTP download & `obstore` upload.
+
+    We use a pool of `ftp_worker`s and a pool of `obstore_worker`s.
 
     We use two MPMC queues. Each `ftp_worker` keeps an `aioftp.Client` alive, and repeatedly takes an `FtpTask` off its `input_queue: Queue[FtpTask]`, downloads the FTP file, and puts the binary payload onto its `output_queue: Queue[ObstoreTask]`.
-    """
-    )
+    """)
     return
 
 
@@ -61,12 +62,10 @@ def _(NamedTuple, Path, aioftp, asyncio):
         dst_path: str
         n_retries: int = 0
 
-
     class ObstoreTask(NamedTuple):
         data: bytes
         dst_path: str
         n_retries: int = 0
-
 
     # TODO: Maybe rename input_queue to ftp_task_queue, and rename output_queue to obstore_task_queue?
     async def ftp_worker(
@@ -75,7 +74,8 @@ def _(NamedTuple, Path, aioftp, asyncio):
         input_queue: asyncio.Queue[FtpTask],
         output_queue: asyncio.Queue[ObstoreTask],
     ) -> None:
-        """A worker that keeps a single FTP connection alive and processes queue items."""
+        """A worker that keeps a single FTP connection alive and processes
+        queue items."""
         print(f"Worker {worker_id}: Starting up...")
 
         # Establish the persistent client connection
@@ -87,7 +87,9 @@ def _(NamedTuple, Path, aioftp, asyncio):
                 try:
                     ftp_task: FtpTask = input_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    print(f"Worker {worker_id}: Queue of FTP tasks is empty. Finishing.")
+                    print(
+                        f"Worker {worker_id}: Queue of FTP tasks is empty. Finishing."
+                    )
                     break
 
                 print(f"Worker {worker_id}: Downloading {ftp_task=}")
@@ -112,7 +114,9 @@ def _(ObstoreTask, asyncio):
     # Rename `output_queue` to something like `obstore_queue`?
 
     # Obstores are designed to work concurrently, so we can share one `obstore` between tasks.
-    async def obstore_worker(worker_id: int, store, output_queue: asyncio.Queue[ObstoreTask]):
+    async def obstore_worker(
+        worker_id: int, store, output_queue: asyncio.Queue[ObstoreTask]
+    ):
         while True:
             print(f"obstore_worker {worker_id}: Getting output_queue task")
             try:
@@ -172,7 +176,9 @@ async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(r"""## Determine which NWP files to transfer""")
+    mo.md(r"""
+    ## Determine which NWP files to transfer
+    """)
     return
 
 
@@ -196,7 +202,6 @@ def _(Sequence, UTC, datetime, timedelta):
 
         return nwp_init_datetimes
 
-
     NWP_INIT_HOURS = (0, 6, 12, 18)
     nwp_init_datetimes = get_nwp_init_datetimes(nwp_init_hours=NWP_INIT_HOURS)
     nwp_init_datetimes
@@ -211,8 +216,9 @@ def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
         duration_of_update: timedelta,
         now: datetime = datetime.now(UTC),
     ) -> list[datetime]:
-        """Remove any NWP run whose files are currently being transfered from DWD's HPC
-        to DWD's FTP server (and hence is in an inconsistent state on the FTP server).
+        """Remove any NWP run whose files are currently being transfered from
+        DWD's HPC to DWD's FTP server (and hence is in an inconsistent state on
+        the FTP server).
 
         For example, for even-numbered ICON-EU initializations, ignore any NWP run if the time now
         is between 2:15 (hh:mm) and 3:45 after the NWP init time.
@@ -239,9 +245,10 @@ def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
         ignore_to_dt = now - delay_between_now_and_start_of_update
         ignore_from_dt = ignore_to_dt - duration_of_update
         print(f"{now=}\n{ignore_from_dt=}\n{ignore_to_dt=}")
-        predicate = lambda init_datetime: not (ignore_from_dt <= init_datetime <= ignore_to_dt)
+        predicate = lambda init_datetime: not (
+            ignore_from_dt <= init_datetime <= ignore_to_dt
+        )
         return list(filter(predicate, nwp_init_datetimes))
-
 
     nwp_init_datetimes_filtered = remove_inconsistent_nwp_model_runs(
         nwp_init_datetimes,
@@ -257,10 +264,11 @@ def _(Path, UTC, datetime):
     def get_destination_path(base_path: Path, nwp_init_datetime: datetime) -> Path:
         return base_path / nwp_init_datetime.strftime("%Y-%m-%dT%HZ")
 
-
     # Test!
     get_destination_path(
-        base_path=Path("/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/"),
+        base_path=Path(
+            "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/"
+        ),
         nwp_init_datetime=datetime.now(UTC),
     )
     return
@@ -325,8 +333,9 @@ def _(arro3, obstore, pl):
         return_arrow=True,
     ).collect()
 
-
-    def obstore_listing_to_polars_dataframe(record_batch: arro3.core.RecordBatch) -> pl.DataFrame:
+    def obstore_listing_to_polars_dataframe(
+        record_batch: arro3.core.RecordBatch,
+    ) -> pl.DataFrame:
         return pl.DataFrame(record_batch)["path", "size"].with_columns(
             pl.col("path")
             .str.split("/")
@@ -334,7 +343,6 @@ def _(arro3, obstore, pl):
             .list.to_struct(fields=["filename"])
             .struct.unnest()
         )
-
 
     obstore_listing_df = obstore_listing_to_polars_dataframe(_list)
     obstore_listing_df
@@ -344,7 +352,9 @@ def _(arro3, obstore, pl):
 @app.cell
 async def _(aioftp):
     async with aioftp.Client.context("opendata.dwd.de") as ftp_client:
-        ftp_listing = await ftp_client.list("/weather/nwp/icon-eu/grib/00/", recursive=True)
+        ftp_listing = await ftp_client.list(
+            "/weather/nwp/icon-eu/grib/00/", recursive=True
+        )
 
     len(ftp_listing)
     return (ftp_listing,)
@@ -354,14 +364,12 @@ async def _(aioftp):
 def _(PurePosixPath, Sequence, ftp_listing):
     type FtpListing = Sequence[tuple[PurePosixPath, dict[str, object]]]
 
-
     def filter_ftp_listing(ftp_listing: FtpListing) -> FtpListing:
         def predicate(path_and_meta) -> bool:
             path, _ = path_and_meta
             return "grib2.bz2" in path.name and "pressure-level" not in path.name
 
         return list(filter(predicate, ftp_listing))
-
 
     filtered_ftp_listing = filter_ftp_listing(ftp_listing)
     len(filtered_ftp_listing)
@@ -375,7 +383,6 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
         filename: str
         variable: str
         size: int
-
 
     def ftp_listing_to_polars_dataframe(ftp_listing: FtpListing) -> pl.DataFrame:
         flattened_ftp_listing = [
@@ -395,7 +402,6 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
             pl.col("size").str.to_integer(),
         )
 
-
     ftp_listing_df = ftp_listing_to_polars_dataframe(filtered_ftp_listing)
     ftp_listing_df
     return (ftp_listing_df,)
@@ -405,16 +411,16 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
 def _(ftp_listing_df, obstore_listing_df):
     # Get the set difference between the files on FTP minus the files on object storage
 
-    files_to_copy = ftp_listing_df.join(obstore_listing_df, on=["size", "filename"], how="anti")
+    files_to_copy = ftp_listing_df.join(
+        obstore_listing_df, on=["size", "filename"], how="anti"
+    )
     files_to_copy
     return (files_to_copy,)
 
 
 @app.cell
 def _(files_to_copy, pl):
-    dst_base_path = (
-        "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/testing-2025-10-10"
-    )
+    dst_base_path = "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/testing-2025-10-10"
 
     files_to_copy.with_columns(
         init_datetime=(
