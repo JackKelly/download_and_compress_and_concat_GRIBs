@@ -48,7 +48,7 @@ def _(mo):
     mo.md(r"""
     ## Concurrent FTP download & `obstore` upload.
 
-    We use a pool of `ftp_worker`s and a pool of `obstore_worker`s.
+    We use an `asyncio.TaskGroup` containing a set of `ftp_worker`s and a set of `obstore_worker`s.
 
     We use two MPMC queues. Each `ftp_worker` keeps an `aioftp.Client` alive, and repeatedly takes an `FtpTask` off its `input_queue: Queue[FtpTask]`, downloads the FTP file, and puts the binary payload onto its `output_queue: Queue[ObstoreTask]`.
     """)
@@ -62,72 +62,85 @@ def _(NamedTuple, Path, aioftp, asyncio):
         dst_path: str
         n_retries: int = 0
 
+
     class ObstoreTask(NamedTuple):
         data: bytes
         dst_path: str
         n_retries: int = 0
 
-    # TODO: Maybe rename input_queue to ftp_task_queue, and rename output_queue to obstore_task_queue?
+
     async def ftp_worker(
         worker_id: int,
         ftp_host: str,
-        input_queue: asyncio.Queue[FtpTask],
-        output_queue: asyncio.Queue[ObstoreTask],
+        ftp_queue: asyncio.Queue[FtpTask],
+        obstore_queue: asyncio.Queue[ObstoreTask],
     ) -> None:
         """A worker that keeps a single FTP connection alive and processes
         queue items."""
-        print(f"Worker {worker_id}: Starting up...")
+        worker_id_str: str = f"ftp_worker {worker_id}:"
+        print(worker_id_str, "Starting up...")
 
         # Establish the persistent client connection
         async with aioftp.Client.context(ftp_host) as ftp_client:
-            print(f"Worker {worker_id}: Connection established and logged in.")
+            print(worker_id_str, "Connection established and logged in.")
 
             # Start continuous processing loop
             while True:
                 try:
-                    ftp_task: FtpTask = input_queue.get_nowait()
+                    ftp_task: FtpTask = ftp_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    print(
-                        f"Worker {worker_id}: Queue of FTP tasks is empty. Finishing."
-                    )
+                    print(worker_id_str, "Queue of FTP tasks is empty. Finishing.")
                     break
 
-                print(f"Worker {worker_id}: Downloading {ftp_task=}")
+                print(worker_id_str, f"Downloading {ftp_task=}")
 
-                async with ftp_client.download_stream(ftp_task.src_path) as stream:
-                    data = await stream.read()
+                try:
+                    async with ftp_client.download_stream(ftp_task.src_path) as stream:
+                        data = await stream.read()
+                except Exception as e:
+                    if (
+                        isinstance(e, aioftp.StatusCodeError)
+                        and isinstance(e.received_codes, tuple)
+                        and len(e.received_codes) == 1
+                        and e.received_codes[0].matches("550")
+                    ):
+                        raise Exception(
+                            f"File not available on FTP server: {ftp_task.src_path}"
+                        ) from e
+                    else:
+                        raise Exception(
+                            f"ftp_client.download_stream raised exception whilst processing {ftp_task=}"
+                        ) from e
 
-                print(f"Worker {worker_id}: Finished {ftp_task=}")
+                print(worker_id_str, f"Finished {ftp_task=}")
 
-                await output_queue.put(ObstoreTask(data, ftp_task.dst_path))
+                await obstore_queue.put(ObstoreTask(data, ftp_task.dst_path))
 
-                input_queue.task_done()
+                ftp_queue.task_done()
 
                 # TODO: Handle retries
     return FtpTask, ObstoreTask, ftp_worker
 
 
 @app.cell
-def _(ObstoreTask, asyncio):
-    # TODO:
-    # Add type for `store` in function declaration.
-    # Rename `output_queue` to something like `obstore_queue`?
-
-    # Obstores are designed to work concurrently, so we can share one `obstore` between tasks.
+def _(ObstoreTask, asyncio, obstore):
     async def obstore_worker(
-        worker_id: int, store, output_queue: asyncio.Queue[ObstoreTask]
+        worker_id: int, store: obstore.store.ObjectStore, obstore_queue: asyncio.Queue[ObstoreTask]
     ):
+        """Obstores are designed to work concurrently, so we can share one
+        `obstore` between tasks."""
+        worker_id_str: str = f"obstore_worker {worker_id}:"
         while True:
-            print(f"obstore_worker {worker_id}: Getting output_queue task")
+            print(worker_id_str, "Getting output_queue task")
             try:
-                _obstore_task: ObstoreTask = await output_queue.get()
+                _obstore_task: ObstoreTask = await obstore_queue.get()
             except asyncio.QueueShutDown:
-                print(f"obstore_worker {worker_id}: output_queue has shut down!")
+                print(worker_id_str, "output_queue has shut down!")
                 break
 
             await store.put_async(_obstore_task.dst_path, _obstore_task.data)
-            output_queue.task_done()
-            print(f"obstore_worker {worker_id}: Done output_queue task")
+            obstore_queue.task_done()
+            print(worker_id_str, "Done output_queue task")
 
             # TODO: Handle retries
     return (obstore_worker,)
@@ -136,8 +149,8 @@ def _(ObstoreTask, asyncio):
 @app.cell
 async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
     # TODO: Rename _input_queue to something like ftp_task_queue?
-    _input_queue = asyncio.Queue(maxsize=10)
-    await _input_queue.put(
+    _ftp_queue = asyncio.Queue(maxsize=10)
+    await _ftp_queue.put(
         FtpTask(
             src_path=Path(
                 "/weather/nwp/icon-eu/grib/00/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025101000_000_ALB_RAD.grib2.bz2"
@@ -146,7 +159,7 @@ async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
         )
     )
 
-    output_queue = asyncio.Queue(maxsize=10)
+    obstore_queue = asyncio.Queue(maxsize=10)
 
     store = obstore.store.LocalStore()
 
@@ -159,18 +172,18 @@ async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
                 ftp_worker(
                     worker_id=worker_id,
                     ftp_host="opendata.dwd.de",
-                    input_queue=_input_queue,
-                    output_queue=output_queue,
+                    ftp_queue=_ftp_queue,
+                    obstore_queue=obstore_queue,
                 )
             )
 
         for worker_id in range(N_CONCURRENT_OBSTORE_WORKERS):
-            tg.create_task(obstore_worker(worker_id, store, output_queue))
+            tg.create_task(obstore_worker(worker_id, store, obstore_queue))
 
-        print("await join")
-        await _input_queue.join()
-        print("joined input_queue!")
-        output_queue.shutdown()
+        print("await _ftp_queue.join()")
+        await _ftp_queue.join()
+        print("joined _ftp_queue!")
+        obstore_queue.shutdown()
     return
 
 
@@ -201,6 +214,7 @@ def _(Sequence, UTC, datetime, timedelta):
                 nwp_init_datetimes.append(yesterday_midnight + nwp_init_hour_td)
 
         return nwp_init_datetimes
+
 
     NWP_INIT_HOURS = (0, 6, 12, 18)
     nwp_init_datetimes = get_nwp_init_datetimes(nwp_init_hours=NWP_INIT_HOURS)
@@ -245,10 +259,9 @@ def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
         ignore_to_dt = now - delay_between_now_and_start_of_update
         ignore_from_dt = ignore_to_dt - duration_of_update
         print(f"{now=}\n{ignore_from_dt=}\n{ignore_to_dt=}")
-        predicate = lambda init_datetime: not (
-            ignore_from_dt <= init_datetime <= ignore_to_dt
-        )
+        predicate = lambda init_datetime: not (ignore_from_dt <= init_datetime <= ignore_to_dt)
         return list(filter(predicate, nwp_init_datetimes))
+
 
     nwp_init_datetimes_filtered = remove_inconsistent_nwp_model_runs(
         nwp_init_datetimes,
@@ -264,11 +277,10 @@ def _(Path, UTC, datetime):
     def get_destination_path(base_path: Path, nwp_init_datetime: datetime) -> Path:
         return base_path / nwp_init_datetime.strftime("%Y-%m-%dT%HZ")
 
+
     # Test!
     get_destination_path(
-        base_path=Path(
-            "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/"
-        ),
+        base_path=Path("/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/"),
         nwp_init_datetime=datetime.now(UTC),
     )
     return
@@ -333,6 +345,7 @@ def _(arro3, obstore, pl):
         return_arrow=True,
     ).collect()
 
+
     def obstore_listing_to_polars_dataframe(
         record_batch: arro3.core.RecordBatch,
     ) -> pl.DataFrame:
@@ -344,6 +357,7 @@ def _(arro3, obstore, pl):
             .struct.unnest()
         )
 
+
     obstore_listing_df = obstore_listing_to_polars_dataframe(_list)
     obstore_listing_df
     return (obstore_listing_df,)
@@ -352,9 +366,7 @@ def _(arro3, obstore, pl):
 @app.cell
 async def _(aioftp):
     async with aioftp.Client.context("opendata.dwd.de") as ftp_client:
-        ftp_listing = await ftp_client.list(
-            "/weather/nwp/icon-eu/grib/00/", recursive=True
-        )
+        ftp_listing = await ftp_client.list("/weather/nwp/icon-eu/grib/00/", recursive=True)
 
     len(ftp_listing)
     return (ftp_listing,)
@@ -364,12 +376,14 @@ async def _(aioftp):
 def _(PurePosixPath, Sequence, ftp_listing):
     type FtpListing = Sequence[tuple[PurePosixPath, dict[str, object]]]
 
+
     def filter_ftp_listing(ftp_listing: FtpListing) -> FtpListing:
         def predicate(path_and_meta) -> bool:
             path, _ = path_and_meta
             return "grib2.bz2" in path.name and "pressure-level" not in path.name
 
         return list(filter(predicate, ftp_listing))
+
 
     filtered_ftp_listing = filter_ftp_listing(ftp_listing)
     len(filtered_ftp_listing)
@@ -383,6 +397,7 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
         filename: str
         variable: str
         size: int
+
 
     def ftp_listing_to_polars_dataframe(ftp_listing: FtpListing) -> pl.DataFrame:
         flattened_ftp_listing = [
@@ -402,6 +417,7 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
             pl.col("size").str.to_integer(),
         )
 
+
     ftp_listing_df = ftp_listing_to_polars_dataframe(filtered_ftp_listing)
     ftp_listing_df
     return (ftp_listing_df,)
@@ -411,16 +427,16 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
 def _(ftp_listing_df, obstore_listing_df):
     # Get the set difference between the files on FTP minus the files on object storage
 
-    files_to_copy = ftp_listing_df.join(
-        obstore_listing_df, on=["size", "filename"], how="anti"
-    )
+    files_to_copy = ftp_listing_df.join(obstore_listing_df, on=["size", "filename"], how="anti")
     files_to_copy
     return (files_to_copy,)
 
 
 @app.cell
 def _(files_to_copy, pl):
-    dst_base_path = "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/testing-2025-10-10"
+    dst_base_path = (
+        "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/testing-2025-10-10"
+    )
 
     files_to_copy.with_columns(
         init_datetime=(
