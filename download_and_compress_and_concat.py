@@ -10,7 +10,7 @@ def _():
     from collections.abc import Sequence
     from datetime import UTC, datetime, timedelta
     from pathlib import Path, PurePosixPath
-    from typing import NamedTuple
+    from dataclasses import dataclass
 
     import aioftp
     import arro3
@@ -19,7 +19,6 @@ def _():
     import obstore.store
     import polars as pl
     return (
-        NamedTuple,
         Path,
         PurePosixPath,
         Sequence,
@@ -27,6 +26,7 @@ def _():
         aioftp,
         arro3,
         asyncio,
+        dataclass,
         datetime,
         mo,
         obstore,
@@ -56,17 +56,35 @@ def _(mo):
 
 
 @app.cell
-def _(NamedTuple, Path, aioftp, asyncio):
-    class FtpTask(NamedTuple):
+def _(Path, aioftp, asyncio, dataclass):
+    @dataclass
+    class FtpTask:
         src_path: Path
-        dst_path: str
+        dst_path: str  # The obstore destination.
         n_retries: int = 0
 
 
-    class ObstoreTask(NamedTuple):
+    @dataclass
+    class ObstoreTask:
         data: bytes
         dst_path: str
         n_retries: int = 0
+
+
+    def _log_ftp_exception(ftp_task: FtpTask, e: Exception, ftp_worker_id_str: str) -> None:
+        error_str = f"{ftp_worker_id_str} WARNING: "
+        # Check if the file is missing from the FTP server:
+        if (
+            isinstance(e, aioftp.StatusCodeError)
+            and isinstance(e.received_codes, tuple)
+            and len(e.received_codes) == 1
+            and e.received_codes[0].matches("550")
+        ):
+            error_str += f"File not available on FTP server: {ftp_task.src_path} "
+
+        print(
+            error_str, f"ftp_client.download_stream raised exception whilst processing {ftp_task=}", e
+        )
 
 
     async def ftp_worker(
@@ -74,6 +92,8 @@ def _(NamedTuple, Path, aioftp, asyncio):
         ftp_host: str,
         ftp_queue: asyncio.Queue[FtpTask],
         obstore_queue: asyncio.Queue[ObstoreTask],
+        failed_ftp_tasks: asyncio.Queue[FtpTask],
+        max_retries: int = 3,
     ) -> None:
         """A worker that keeps a single FTP connection alive and processes
         queue items."""
@@ -89,36 +109,28 @@ def _(NamedTuple, Path, aioftp, asyncio):
                 try:
                     ftp_task: FtpTask = ftp_queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    print(worker_id_str, "Queue of FTP tasks is empty. Finishing.")
+                    print(worker_id_str, "ftp_queue is empty. Finishing.")
                     break
 
-                print(worker_id_str, f"Downloading {ftp_task=}")
+                print(worker_id_str, f"Attempting to download {ftp_task=}")
 
                 try:
                     async with ftp_client.download_stream(ftp_task.src_path) as stream:
                         data = await stream.read()
                 except Exception as e:
-                    if (
-                        isinstance(e, aioftp.StatusCodeError)
-                        and isinstance(e.received_codes, tuple)
-                        and len(e.received_codes) == 1
-                        and e.received_codes[0].matches("550")
-                    ):
-                        raise Exception(
-                            f"File not available on FTP server: {ftp_task.src_path}"
-                        ) from e
+                    _log_ftp_exception(ftp_task, e, worker_id_str)
+                    if ftp_task.n_retries < max_retries:
+                        ftp_task.n_retries += 1
+                        print(worker_id_str, "WARNING: Putting ftp_task back on queue to retry later.")
+                        await ftp_queue.put(ftp_task)
                     else:
-                        raise Exception(
-                            f"ftp_client.download_stream raised exception whilst processing {ftp_task=}"
-                        ) from e
-
-                print(worker_id_str, f"Finished {ftp_task=}")
-
-                await obstore_queue.put(ObstoreTask(data, ftp_task.dst_path))
-
-                ftp_queue.task_done()
-
-                # TODO: Handle retries
+                        print(worker_id_str, "ERROR: Giving up on ftp_task")
+                        await failed_ftp_tasks.put(ftp_task)
+                else:
+                    print(worker_id_str, f"Finished downloading {ftp_task=}")
+                    await obstore_queue.put(ObstoreTask(data, ftp_task.dst_path))
+                finally:
+                    ftp_queue.task_done()
     return FtpTask, ObstoreTask, ftp_worker
 
 
@@ -127,20 +139,22 @@ def _(ObstoreTask, asyncio, obstore):
     async def obstore_worker(
         worker_id: int, store: obstore.store.ObjectStore, obstore_queue: asyncio.Queue[ObstoreTask]
     ):
-        """Obstores are designed to work concurrently, so we can share one
-        `obstore` between tasks."""
+        """Obstores are designed to work concurrently, so we can share one `obstore` between tasks."""
         worker_id_str: str = f"obstore_worker {worker_id}:"
         while True:
-            print(worker_id_str, "Getting output_queue task")
+            print(worker_id_str, "Getting obstore task")
             try:
-                _obstore_task: ObstoreTask = await obstore_queue.get()
+                obstore_task: ObstoreTask = await obstore_queue.get()
             except asyncio.QueueShutDown:
-                print(worker_id_str, "output_queue has shut down!")
+                print(worker_id_str, "obstore_queue has shut down!")
                 break
 
-            await store.put_async(_obstore_task.dst_path, _obstore_task.data)
+            await store.put_async(obstore_task.dst_path, obstore_task.data)
             obstore_queue.task_done()
-            print(worker_id_str, "Done output_queue task")
+            print(
+                worker_id_str,
+                f"Done writing to {obstore_task.dst_path} after {obstore_task.n_retries} retries.",
+            )
 
             # TODO: Handle retries
     return (obstore_worker,)
@@ -148,16 +162,17 @@ def _(ObstoreTask, asyncio, obstore):
 
 @app.cell
 async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
-    # TODO: Rename _input_queue to something like ftp_task_queue?
     _ftp_queue = asyncio.Queue(maxsize=10)
     await _ftp_queue.put(
         FtpTask(
             src_path=Path(
-                "/weather/nwp/icon-eu/grib/00/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025101000_000_ALB_RAD.grib2.bz2"
+                "/weather/nwp/icon-eu/grib/00/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025111900_000_ALB_RAD.grib2.bz2"
             ),
             dst_path="/home/jack/data/test.grib2.bz2",
         )
     )
+
+    _failed_ftp_tasks = asyncio.Queue()
 
     obstore_queue = asyncio.Queue(maxsize=10)
 
@@ -174,6 +189,7 @@ async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
                     ftp_host="opendata.dwd.de",
                     ftp_queue=_ftp_queue,
                     obstore_queue=obstore_queue,
+                    failed_ftp_tasks=_failed_ftp_tasks,
                 )
             )
 
@@ -184,6 +200,18 @@ async def _(FtpTask, Path, asyncio, ftp_worker, obstore, obstore_worker):
         await _ftp_queue.join()
         print("joined _ftp_queue!")
         obstore_queue.shutdown()
+
+    if _failed_ftp_tasks.empty():
+        print("Good news: No failed FTP tasks!")
+    else:
+        while True:
+            try:
+                ftp_task: FtpTask = _failed_ftp_tasks.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                print("Failed FTP task:", ftp_task)
+                _failed_ftp_tasks.task_done()
     return
 
 
