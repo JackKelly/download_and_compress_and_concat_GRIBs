@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.17.8"
+__generated_with = "0.18.0"
 app = marimo.App(width="full")
 
 
@@ -11,6 +11,8 @@ def _():
     from datetime import UTC, datetime, timedelta
     from pathlib import Path, PurePosixPath
     from dataclasses import dataclass
+    from typing import NamedTuple
+
 
     import aioftp
     import arro3
@@ -19,6 +21,7 @@ def _():
     import obstore.store
     import polars as pl
     return (
+        NamedTuple,
         Path,
         PurePosixPath,
         Sequence,
@@ -225,6 +228,7 @@ def _(mo):
 
 @app.cell
 def _(Sequence, UTC, datetime, timedelta):
+    # TODO: Delete this function. It's not needed if we just grab all the available files on the FTP server.
     def get_nwp_init_datetimes(
         nwp_init_hours: Sequence[int], now: datetime = datetime.now(UTC)
     ) -> list[datetime]:
@@ -252,6 +256,7 @@ def _(Sequence, UTC, datetime, timedelta):
 
 @app.cell
 def _(Sequence, UTC, datetime, nwp_init_datetimes, timedelta):
+    # TODO: Delete this function. It's not needed if we just grab all the available files on the FTP server.
     def remove_inconsistent_nwp_model_runs(
         nwp_init_datetimes: Sequence[datetime],
         delay_between_now_and_start_of_update: timedelta,
@@ -311,11 +316,20 @@ def _(Path, UTC, datetime):
         base_path=Path("/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/"),
         nwp_init_datetime=datetime.now(UTC),
     )
-    return
+    return (get_destination_path,)
 
 
-app._unparsable_cell(
-    r"""
+@app.cell
+def _(
+    FtpTask,
+    Path,
+    Sequence,
+    UTC,
+    datetime,
+    get_destination_path,
+    nwp_init_datetimes,
+    obstore,
+):
     def calculate_which_files_to_transfer(
         ftp_host: str,
         ftp_base_path: Path,
@@ -339,29 +353,26 @@ app._unparsable_cell(
         # and then, for all the files we want to copy from FTP, create the dst_path in the pl.DataFrame.
 
         # Don't recursively list everything on the FTP server under /weather/nwp/icon-eu/grib/, because we're
-        # not interested in the odd-numbered inits or the init we're gonna leave out because it's inconsistent.
-        # Although, perhaps we don't actually need to filter out the \"inconsistent\" model runs, now that we're 
+        # not interested in the odd-numbered inits. Instead, go init-by-init.
+
+        # Perhaps we don't actually need to filter out the "inconsistent" model runs, now that we're
         # just listing everything. We could make the code simpler _and_ get files with lower latency by just
-        # copying everything (and removing remove_inconsistent_nwp_model_runs).
+        # copying everything (and removing remove_inconsistent_nwp_model_runs and get_nwp_init_datetimes).
 
         # And then test downloading actual data locally.
         # Then think about how to move this code into small-sized PRs for dynamical/reformatters.
 
-        )
-
 
     calculate_which_files_to_transfer(
-        ftp_host=\"opendata.dwd.de\",
-        ftp_base_path=Path(\"/weather/nwp/icon-eu/grib/\"),
+        ftp_host="opendata.dwd.de",
+        ftp_base_path=Path("/weather/nwp/icon-eu/grib/"),
         dst_store=obstore.store.LocalStore(),
         dst_base_path=Path(
-            \"/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/testing-2025-10-10/\"
+            "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/testing-2025-10-10/"
         ),
-        nwp_init_datetimes=nwp_init_datetimes_filtered,
+        nwp_init_datetimes=nwp_init_datetimes,
     )
-    """,
-    name="_"
-)
+    return
 
 
 @app.cell
@@ -377,12 +388,16 @@ def _(arro3, obstore, pl):
     def obstore_listing_to_polars_dataframe(
         record_batch: arro3.core.RecordBatch,
     ) -> pl.DataFrame:
-        return pl.DataFrame(record_batch)["path", "size"].with_columns(
-            pl.col("path")
-            .str.split("/")
-            .list.tail(1)
-            .list.to_struct(fields=["filename"])
-            .struct.unnest()
+        return (
+            pl.DataFrame(record_batch)["path", "size"]
+            .with_columns(
+                pl.col("path")
+                .str.split("/")
+                .list.tail(1)
+                .list.to_struct(fields=["filename"])
+                .struct.unnest()
+            )
+            .rename({"size": "filesize_bytes"})
         )
 
 
@@ -393,6 +408,9 @@ def _(arro3, obstore, pl):
 
 @app.cell
 async def _(aioftp):
+    # Get the full list of files available on the FTP server for a given NWP init time.
+    # This takes about 20 seconds.
+
     async with aioftp.Client.context("opendata.dwd.de") as ftp_client:
         ftp_listing = await ftp_client.list("/weather/nwp/icon-eu/grib/00/", recursive=True)
 
@@ -424,7 +442,7 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
         path: PurePosixPath
         filename: str
         variable: str
-        size: int
+        filesize_bytes: int
 
 
     def ftp_listing_to_polars_dataframe(ftp_listing: FtpListing) -> pl.DataFrame:
@@ -433,7 +451,7 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
                 path=listing[0],
                 filename=listing[0].name,
                 variable=listing[0].parts[-2],
-                size=listing[1]["size"],
+                filesize_bytes=listing[1]["size"],
             )
             for listing in ftp_listing
         ]
@@ -442,7 +460,7 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
             flattened_ftp_listing,
             schema=FtpListingRow._fields,
         ).with_columns(
-            pl.col("size").str.to_integer(),
+            pl.col("filesize_bytes").str.to_integer(),
         )
 
 
@@ -455,13 +473,17 @@ def _(FtpListing, NamedTuple, PurePosixPath, filtered_ftp_listing, pl):
 def _(ftp_listing_df, obstore_listing_df):
     # Get the set difference between the files on FTP minus the files on object storage
 
-    files_to_copy = ftp_listing_df.join(obstore_listing_df, on=["size", "filename"], how="anti")
+    files_to_copy = ftp_listing_df.join(
+        obstore_listing_df, on=["filesize_bytes", "filename"], how="anti"
+    )
     files_to_copy
     return (files_to_copy,)
 
 
 @app.cell
 def _(files_to_copy, pl):
+    # Compute the dst_path for each file. (First extract the NWP init_datetime from the filename.)
+
     dst_base_path = (
         "/home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/testing-2025-10-10"
     )
