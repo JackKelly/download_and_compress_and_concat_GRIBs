@@ -65,7 +65,7 @@ def _(
     class TransferJob:
         src_ftp_path: pathlib.PurePosixPath
         src_ftp_file_size_bytes: int
-        dst_obstore_path: str
+        dst_obstore_path: pathlib.PurePosixPath  # Starting at the datetime part of the path.
         nwp_init_datetime: datetime.datetime
 
 
@@ -116,9 +116,10 @@ def _(
         nwp_init_obstore_str = nwp_init_datetime.strftime(NWP_INIT_DATETIME_FMT_OBSTORE)
 
         # Create dst_obstore_path:
-        nwp_model_name = ftp_path.parts[3]
         nwp_variable_name = ftp_path.parts[6]
-        dst_obstore_path = f"{nwp_model_name}/regular-lat-lon/{nwp_init_obstore_str}/{nwp_variable_name}/{ftp_path.name}"
+        dst_obstore_path = (
+            pathlib.PurePosixPath(nwp_init_obstore_str) / nwp_variable_name / ftp_path.name
+        )
         file_size_bytes = int(ftp_info["size"])
 
         return TransferJob(
@@ -160,6 +161,7 @@ def _(transfer_jobs):
 
 @app.cell
 def _(transfer_jobs):
+    # Find the earliest NWP init datetime. This will be what we'll use for the `offset` when listing objects on object storage.
     min_nwp_init_datetime = min([transfer_job.nwp_init_datetime for transfer_job in transfer_jobs])
     min_nwp_init_datetime
     return (min_nwp_init_datetime,)
@@ -191,7 +193,7 @@ def _(NWP_INIT_DATETIME_FMT_OBSTORE: "Final", min_nwp_init_datetime, obstore):
 
 @app.cell
 def _(obstore_listing):
-    obstore_listing[0]["path"][68:]
+    obstore_listing[0]["path"]
     return
 
 
@@ -207,30 +209,43 @@ def _(NamedTuple, obstore_listing):
         file_size_bytes: int
 
 
-    obstore_set = {PathAndSize(item["path"][68:], item["size"]) for item in obstore_listing}
+    obstore_set = {PathAndSize(item["path"], item["size"]) for item in obstore_listing}
     obstore_set
     return PathAndSize, obstore_set
 
 
 @app.cell
-def _(PathAndSize, obstore_set, transfer_jobs):
-    jobs_still_to_download = []
+def _(Final, NamedTuple, PathAndSize, obstore_set, pathlib, transfer_jobs):
+    OBSTORE_ROOT: Final[pathlib.PurePosixPath] = pathlib.PurePosixPath(
+        "home/jack/data/ICON-EU/grib/download_and_compress_and_concat_script/icon-eu/regular-lat-lon/"
+    )
+
+
+    class SrcAndDst(NamedTuple):
+        src_ftp_path: pathlib.PurePosixPath
+        dst_obstore_path: str
+
+
+    jobs_still_to_download: list[SrcAndDst] = []
 
     for _transfer_job in transfer_jobs:
-        ftp_file = PathAndSize(_transfer_job.dst_obstore_path, _transfer_job.src_ftp_file_size_bytes)
+        full_obstore_path = str(OBSTORE_ROOT / _transfer_job.dst_obstore_path)
+        ftp_file = PathAndSize(full_obstore_path, _transfer_job.src_ftp_file_size_bytes)
         if ftp_file not in obstore_set:
-            jobs_still_to_download.append(_transfer_job)
+            jobs_still_to_download.append(
+                SrcAndDst(src_ftp_path=_transfer_job.src_ftp_path, dst_obstore_path=full_obstore_path)
+            )
     return (jobs_still_to_download,)
 
 
 @app.cell
-def _(jobs_still_to_download):
+def _(jobs_still_to_download: "list[SrcAndDst]"):
     len(jobs_still_to_download)
     return
 
 
 @app.cell
-def _(jobs_still_to_download):
+def _(jobs_still_to_download: "list[SrcAndDst]"):
     jobs_still_to_download[0]
     return
 
