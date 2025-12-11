@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.18.1"
+__generated_with = "0.18.4"
 app = marimo.App(width="full")
 
 
@@ -14,168 +14,185 @@ def _():
     import re
     import datetime
     from typing import Final, NamedTuple
-    return Final, NamedTuple, aioftp, dataclass, datetime, obstore, pathlib, re
+    return Final, NamedTuple, aioftp, obstore, pathlib
 
 
 @app.cell
 def _(PurePosixPath, aioftp):
     type FtpListItem = tuple[PurePosixPath, aioftp.client.BasicListInfo | aioftp.client.UnixListInfo]
-    return (FtpListItem,)
-
-
-@app.cell
-async def _(FtpListItem, aioftp):
-    async def get_ftp_listing(host: str, path: str) -> list[FtpListItem]:
-        """List all files and directories in `path`. If `path` is a file, then result will be empty."""
-        # Get the full list of files available on the FTP server for a given NWP init time.
-        # This takes about 30 seconds.
-        async with aioftp.Client.context(host) as ftp_client:
-            ftp_listing = await ftp_client.list(path, recursive=True)
-        return ftp_listing
-
-
-    ftp_listing = await get_ftp_listing("opendata.dwd.de", "/weather/nwp/icon-eu/grib/00/")
-    return (ftp_listing,)
-
-
-@app.cell
-def _(ftp_listing):
-    ftp_listing[0]
     return
 
 
-@app.cell
-def _(ftp_listing):
-    ftp_listing[96]
-    return
-
-
-@app.cell
-def _(
-    Final,
-    FtpListItem,
-    aioftp,
-    dataclass,
-    datetime,
-    ftp_listing,
-    pathlib,
-    re,
-):
+app._unparsable_cell(
+    r"""
     @dataclass
     class TransferJob:
         src_ftp_path: pathlib.PurePosixPath
         src_ftp_file_size_bytes: int
         dst_obstore_path: pathlib.PurePosixPath  # Starting at the datetime part of the path.
-        nwp_init_datetime: datetime.datetime
+        nwp_init_datetime: datetime.datetime  # Extracted from the FTP path
 
 
-    NWP_INIT_DATETIME_FMT_OBSTORE: Final = "%Y-%m-%dT%HZ"
+    class FtpTransferCalculator:
+        async def transfer_new_files_for_all_nwp_inits(self):
+            ftp_paths_for_nwp_inits: list[
+                pathlib.PurePosixPath
+            ] = await self.get_ftp_path_for_every_nwp_init_available_on_ftp_server()
+            for ftp_path in ftp_paths_for_nwp_inits:
+                self.transfer_nwp_init(ftp_path)
 
+        def transfer_new_files_for_single_nwp_init(
+            self, ftp_path_of_nwp_init: pathlib.PurePosixPath
+        ) -> None:
+            ftp_listing = await self.get_ftp_listing_for_nwp_init(ftp_path_of_nwp_init)
 
-    def dwd_ftp_path_to_obstore_path(ftp_list_item: FtpListItem) -> None | TransferJob:
-        """Converts the FTP path to the destination object store path.
+            # Collect list of TransferJobs from FTP server's listing:
+            ftp_transfer_jobs: list[TransferJob] = []
+            for ftp_list_item in ftp_listing:
+                if not self.skip_ftp_item(ftp_list_item):
+                    transfer_job = self.ftp_list_item_to_transfer_job(ftp_list_item)
+                    ftp_transfer_jobs.append(transfer_job)
 
-        Or returns None if this file should be ignored.
-
-        This function is designed to work with the style of DWD FTP ICON-EU path in use in 2025, such as:
-        /weather/nwp/icon-eu/grib/00/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025112600_004_ALB_RAD.grib2.bz2
-        """
-        ftp_path: pathlib.PurePosixPath = ftp_list_item[0]
-        ftp_info: aioftp.client.UnixListInfo = ftp_list_item[1]
-
-        # Skip items that we don't need:
-        if ftp_info["type"] == "dir":  # Skip directories.
-            return
-
-        if not ftp_path.name.endswith("grib2.bz2"):
-            return
-
-        if "pressure-level" in ftp_path.name:  # Skip pressure-level files.
-            return
-
-        # Check that any remaining file is the correct shape:
-        EXPECTED_N_PARTS: Final = 8
-        if len(ftp_path.parts) != EXPECTED_N_PARTS:
-            raise ValueError(
-                f"Expected the FTP path to have {EXPECTED_N_PARTS}, not {len(ftp_path.parts)}"
-            )
-        if ftp_path.parts[1:3] != ("weather", "nwp"):
-            raise ValueError(
-                f"Expected the start of the FTP path to be /weather/nwp/..., not {ftp_path}"
+            # Find the earliest NWP init datetime. This will be what we'll use for the `offset` when listing objects on object storage.
+            min_nwp_init_datetime = min(
+                [transfer_job.nwp_init_datetime for transfer_job in transfer_jobs]
             )
 
-        # Extract the NWP init datetime string from the filename. For example, from this filename:
-        #     "...lat-lon_single-level_2025112600_004_ALB_RAD.grib2.bz2"
-        # Extract this:                ^^^^^^^^^^
-        nwp_init_date_match = re.search(r"_(20\d{8})_", ftp_path.stem)
-        if nwp_init_date_match:
-            nwp_init_date_str = nwp_init_date_match.group(1)
-        else:
-            raise ValueError(f"Failed to match datetime string in {ftp_path.name=}")
-        nwp_init_datetime = datetime.datetime.strptime(nwp_init_date_str, "%Y%m%d%H")
-        nwp_init_obstore_str = nwp_init_datetime.strftime(NWP_INIT_DATETIME_FMT_OBSTORE)
+            # TODO(Jack): Move code from bottom of this notebook to here.
 
-        # Create dst_obstore_path:
-        nwp_variable_name = ftp_path.parts[6]
-        dst_obstore_path = (
-            pathlib.PurePosixPath(nwp_init_obstore_str) / nwp_variable_name / ftp_path.name
-        )
-        file_size_bytes = int(ftp_info["size"])
+        async def get_ftp_listing_for_nwp_init(self, path: str) -> list[FtpListItem]:
+            raise NotImplementedError()
 
-        return TransferJob(
-            src_ftp_path=ftp_path,
-            src_ftp_file_size_bytes=file_size_bytes,
-            dst_obstore_path=dst_obstore_path,
-            nwp_init_datetime=nwp_init_datetime,
-        )
+        async def get_ftp_path_for_every_nwp_init_available_on_ftp_server(
+            self,
+        ) -> list[pathlib.PurePosixPath]:
+            raise NotImplementedError()
+
+        def skip_ftp_item(self, ftp_list_item: FtpListItem) -> bool:
+            ftp_path: pathlib.PurePosixPath = ftp_list_item[0]
+            ftp_info: aioftp.client.UnixListInfo = ftp_list_item[1]
+
+            # Skip items that we don't need:
+            if ftp_info[\"type\"] == \"dir\":  # Skip directories.
+                return True
+
+            if not ftp_path.name.endswith(\"grib2.bz2\"):
+                return True
+
+            if \"pressure-level\" in ftp_path.name:  # Skip pressure-level files.
+                return True
+
+            return False
+
+        def sanity_check_ftp_path(self, ftp_path: pathlib.PurePosixPath) -> None:
+            raise NotImplementedError()
+
+        def extract_init_datetime_from_ftp_path(
+            self, ftp_path: pathlib.PurePosixPath
+        ) -> datetime.datetime:
+            raise NotImplementedError()
+
+        def extract_nwp_variable_name_from_ftp_path(self, ftp_path: pathlib.PurePosixPath) -> str:
+            raise NotImplementedError()
+
+        def get_format_string_for_obstore_nwp_init_datetime(self) -> Final[str]:
+            return \"%Y-%m-%dT%HZ\"
+
+        def ftp_list_item_to_transfer_job(self, ftp_list_item: FtpListItem) -> TransferJob:
+            \"\"\"Converts the FTP path to the destination object store path.
+
+            This function is designed to work with the style of DWD FTP ICON-EU path in use in 2025, such as:
+            /weather/nwp/icon-eu/grib/00/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025112600_004_ALB_RAD.grib2.bz2
+            \"\"\"
+            ftp_path: pathlib.PurePosixPath = ftp_list_item[0]
+            ftp_info: aioftp.client.UnixListInfo = ftp_list_item[1]
+
+            self.sanity_check_ftp_path(ftp_path)
+
+            nwp_init_datetime: datetime.datetime = self.extract_init_datetime_from_ftp_path(ftp_path)
+            nwp_init_datetime_obstore_str = nwp_init_datetime.strftime(
+                self.get_format_string_for_obstore_nwp_init_datetime()
+            )
+
+            # Create dst_obstore_path:
+            nwp_variable_name = self.extract_nwp_variable_name_from_ftp_path(ftp_path)
+            dst_obstore_path = (
+                pathlib.PurePosixPath(nwp_init_datetime_obstore_str)
+                / nwp_variable_name
+                / ftp_path.name
+            )
+            file_size_bytes = int(ftp_info[\"size\"])
+
+            return TransferJob(
+                src_ftp_path=ftp_path,
+                src_ftp_file_size_bytes=file_size_bytes,
+                dst_obstore_path=dst_obstore_path,
+                nwp_init_datetime=nwp_init_datetime,
+            )
+
+
+    class DwdFtpTransferCalculator(FtpTransferCalculator):
+        async def get_ftp_listing_for_nwp_init(self, path: str) -> list[FtpListItem]:
+            \"\"\"List all files and directories in `path`. If `path` is a file, then result will be empty.\"\"\"
+            # Get the full list of files available on the FTP server for a given NWP init time.
+            # This takes about 30 seconds.
+            async with aioftp.Client.context(\"opendata.dwd.de\") as ftp_client:
+                ftp_listing = await ftp_client.list(path, recursive=True)
+            return ftp_listing
+
+        async def get_ftp_path_for_every_nwp_init_available_on_ftp_server(
+            self,
+        ) -> list[pathlib.PurePosixPath]:
+            async with aioftp.Client.context(\"opendata.dwd.de\") as ftp_client:
+                ftp_listing: list[FtpListItem] = await ftp_client.list(\"/weather/nwp/icon-eu/grib\")
+            paths: list[pathlib.PurePosixPath] = []
+            for ftp_list_item in ftp_listing:
+                ftp_path: pathlib.PurePosixPath = ftp_list_item[0]
+                ftp_info: aioftp.client.UnixListInfo = ftp_list_item[1]
+                if ftp_info[\"type\"] == \"dir\":
+                    paths.append(ftp_path)
+            return paths
+
+        def sanity_check_ftp_path(self, ftp_path: pathlib.PurePosixPath) -> None:
+            # Check that any remaining file is the correct shape:
+            EXPECTED_N_PARTS: Final = 8
+            if len(ftp_path.parts) != EXPECTED_N_PARTS:
+                raise ValueError(
+                    f\"Expected the FTP path to have {EXPECTED_N_PARTS}, not {len(ftp_path.parts)}\"
+                )
+            if ftp_path.parts[1:3] != (\"weather\", \"nwp\"):
+                raise ValueError(
+                    f\"Expected the start of the FTP path to be /weather/nwp/..., not {ftp_path}\"
+                )
+
+        def extract_init_datetime_from_ftp_path(
+            self, ftp_path: pathlib.PurePosixPath
+        ) -> datetime.datetime:
+            # Extract the NWP init datetime string from the filename. For example, from this filename:
+            #     \"...lat-lon_single-level_2025112600_004_ALB_RAD.grib2.bz2\"
+            # Extract this:                ^^^^^^^^^^
+            nwp_init_date_match = re.search(r\"_(20\d{8})_\", ftp_path.stem)
+            if nwp_init_date_match:
+                nwp_init_date_str = nwp_init_date_match.group(1)
+            else:
+                raise ValueError(f\"Failed to match datetime string in {ftp_path.name=}\")
+            return datetime.datetime.strptime(nwp_init_date_str, \"%Y%m%d%H\")
+
+        def extract_nwp_variable_name_from_ftp_path(self, ftp_path: pathlib.PurePosixPath) -> str:
+            return ftp_path.parts[6]
 
 
     # Test!
     _ftp_list_item = ftp_listing[100]
-    print(f"{_ftp_list_item=}")
-    dwd_ftp_path_to_obstore_path(_ftp_list_item)
-    return NWP_INIT_DATETIME_FMT_OBSTORE, dwd_ftp_path_to_obstore_path
+    print(f\"{_ftp_list_item=}\")
+    DwdFtpTransferCalculator().ftp_list_item_to_transfer_job(_ftp_list_item)
+    """,
+    name="_"
+)
 
 
 @app.cell
-def _(dwd_ftp_path_to_obstore_path, ftp_listing):
-    transfer_jobs = []
-    for ftp_list_item in ftp_listing:
-        transfer_job = dwd_ftp_path_to_obstore_path(ftp_list_item)
-        if transfer_job:
-            transfer_jobs.append(transfer_job)
-    return (transfer_jobs,)
-
-
-@app.cell
-def _(ftp_listing, transfer_jobs):
-    len(ftp_listing), len(transfer_jobs)
-    return
-
-
-@app.cell
-def _(transfer_jobs):
-    transfer_jobs[0]
-    return
-
-
-@app.cell
-def _(transfer_jobs):
-    # Find the earliest NWP init datetime. This will be what we'll use for the `offset` when listing objects on object storage.
-    min_nwp_init_datetime = min([transfer_job.nwp_init_datetime for transfer_job in transfer_jobs])
-    min_nwp_init_datetime
-    return (min_nwp_init_datetime,)
-
-
-@app.cell
-def _(transfer_jobs):
-    # Just out of curiosity, let's find the max too:
-    max([transfer_job.nwp_init_datetime for transfer_job in transfer_jobs])
-    return
-
-
-@app.cell
-def _(NWP_INIT_DATETIME_FMT_OBSTORE: "Final", min_nwp_init_datetime, obstore):
+def _(NWP_INIT_DATETIME_FMT_OBSTORE, min_nwp_init_datetime, obstore):
     min_nwp_init_datetime_str = min_nwp_init_datetime.strftime(NWP_INIT_DATETIME_FMT_OBSTORE)
 
     obstore_listing = (
