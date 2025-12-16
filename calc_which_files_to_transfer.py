@@ -5,6 +5,14 @@ app = marimo.App(width="full")
 
 
 @app.cell
+def _(mo):
+    mo.md(r"""
+    # Note that this code has moved to [`reformatters` PR331](https://github.com/dynamical-org/reformatters/pull/331)!
+    """)
+    return
+
+
+@app.cell
 def _():
     import marimo as mo
     import aioftp
@@ -34,6 +42,7 @@ def _():
         aioftp,
         dataclass,
         datetime,
+        mo,
         obstore,
         re,
     )
@@ -67,18 +76,15 @@ async def _(
         src_ftp_path: PurePosixPath
         src_ftp_file_size_bytes: int
 
-        # `dst_obstore_path` starts at the datetime part of the path, for example `dst_obstore_path` could be:
-        # '2025-12-12T00Z/alb_rad/icon-eu_europe_regular-lat-lon_single-level_2025121200_000_ALB_RAD.grib2.bz2'
+        # The destination path in the object store.
+        # Starts at the datetime part, e.g., '2025-12-12T00Z/alb_rad/...'.
         dst_obstore_path: PurePosixPath
 
-        # Extracted from `src_ftp_path`
-        nwp_init_datetime: datetime
+        nwp_init_datetime: datetime  # The NWP initialization datetime, extracted from `src_ftp_path`.
 
 
-    # Put the obstore items into a set, so we can quickly check for set membership when removing items already downloaded:
+    # We use a NamedTuple so we can store `PathAndSize` objects in a set.
     class PathAndSize(NamedTuple):
-        """NamedTuple to use as the items in a set."""
-
         path: str
         file_size_bytes: int
 
